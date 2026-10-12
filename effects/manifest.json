@@ -1,0 +1,149 @@
+{
+ "name": "Cinematic Spell Effects",
+ "version": 1,
+ "resolution": "1080x1080",
+ "blend": "screen",
+ "clips": [
+  {
+   "id": "light",
+   "file": "light.mp4",
+   "label": "Lumos glow",
+   "bytes": 333668,
+   "duration": 3.2
+  },
+  {
+   "id": "light_max",
+   "file": "light_max.mp4",
+   "label": "Lumos Maxima flare",
+   "bytes": 763811,
+   "duration": 3.6
+  },
+  {
+   "id": "fire",
+   "file": "fire.mp4",
+   "label": "Fire wall",
+   "bytes": 2059715,
+   "duration": 3.6
+  },
+  {
+   "id": "explosion",
+   "file": "explosion.mp4",
+   "label": "Fireball explosion",
+   "bytes": 785611,
+   "duration": 3.4
+  },
+  {
+   "id": "bolt_red",
+   "file": "bolt_red.mp4",
+   "label": "Red spell beam",
+   "bytes": 860614,
+   "duration": 2.8
+  },
+  {
+   "id": "bolt_green",
+   "file": "bolt_green.mp4",
+   "label": "Green hex beam",
+   "bytes": 884989,
+   "duration": 2.8
+  },
+  {
+   "id": "bolt_blue",
+   "file": "bolt_blue.mp4",
+   "label": "Blue-white spell beam",
+   "bytes": 877196,
+   "duration": 2.8
+  },
+  {
+   "id": "shield",
+   "file": "shield.mp4",
+   "label": "Protego shield dome",
+   "bytes": 885486,
+   "duration": 3.4
+  },
+  {
+   "id": "patronus",
+   "file": "patronus.mp4",
+   "label": "Patronus light vortex",
+   "bytes": 3111560,
+   "duration": 4.4
+  },
+  {
+   "id": "lightning",
+   "file": "lightning.mp4",
+   "label": "Lightning strikes",
+   "bytes": 595369,
+   "duration": 3.2
+  },
+  {
+   "id": "levitate",
+   "file": "levitate.mp4",
+   "label": "Rising golden dust",
+   "bytes": 2752537,
+   "duration": 3.6
+  },
+  {
+   "id": "water",
+   "file": "water.mp4",
+   "label": "Water jet",
+   "bytes": 801304,
+   "duration": 3.2
+  },
+  {
+   "id": "ice",
+   "file": "ice.mp4",
+   "label": "Frost & ice crystals",
+   "bytes": 531180,
+   "duration": 3.4
+  },
+  {
+   "id": "summon",
+   "file": "summon.mp4",
+   "label": "Summoning vortex",
+   "bytes": 4850669,
+   "duration": 2.8
+  },
+  {
+   "id": "sparkle",
+   "file": "sparkle.mp4",
+   "label": "Golden sparkle burst",
+   "bytes": 1530147,
+   "duration": 3.0
+  },
+  {
+   "id": "rainbow",
+   "file": "rainbow.mp4",
+   "label": "Rainbow sparkle burst",
+   "bytes": 1495177,
+   "duration": 3.0
+  },
+  {
+   "id": "smoke",
+   "file": "smoke.mp4",
+   "label": "Vanishing smoke",
+   "bytes": 263375,
+   "duration": 3.0
+  },
+  {
+   "id": "vortex",
+   "file": "vortex.mp4",
+   "label": "Wind vortex",
+   "bytes": 2973099,
+   "duration": 3.2
+  },
+  {
+   "id": "nature",
+   "file": "nature.mp4",
+   "label": "Leaves & blossoms",
+   "bytes": 1834778,
+   "duration": 3.6
+  },
+  {
+   "id": "shockwave",
+   "file": "shockwave.mp4",
+   "label": "Force shockwave",
+   "bytes": 409860,
+   "duration": 2.6
+  }
+ ],
+ "totalBytes": 28600145
+}
