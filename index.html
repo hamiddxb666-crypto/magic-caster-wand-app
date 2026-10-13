@@ -3406,7 +3406,11 @@ const SpellInput={
   cast(spell,source,match){
     if(!GreatHall.on && Academy.handle(spell,source))return;
     if(GreatHall.on){this.clearPending();performCast(spell,{source});return;}
-    if(Games.active){this.clearPending();Games.onSpell(spell,source);return;}
+    if(Games.active){this.clearPending();
+      // Camera (wand tip) games follow only the tip the camera sees: spells recognised by the wand's own
+      // motion sensors are ignored there. Voice still works, and the grip still marks drawing.
+      if(source==='wand'&&Games.ctrl==='tip'){Games.ignoreWandSpell(spell);return;}
+      Games.onSpell(spell,source);return;}
     if(!GreatHall.on && !$('wandCheck')?.classList.contains('open')){
       if(WebBrowser.handleWand(spell)||MediaHub.handleWand(spell)){this.clearPending();return;}
     }
@@ -4359,6 +4363,118 @@ function brightSpot(v, threshold, prev) {
     if (score > best) { best = score; result = { x: x / w, y: y / h }; }
   }
   return result;
+}
+
+const _gameSpot = { c: null, ctx: null };
+// Games only: the playfield follows the physical tip, so a glowing tip held close to the camera must stay
+// found and centred, while lamps, windows, reflections and lit skin (nose/forehead sheen) must not take
+// the pointer, even at maximum dim-tip sensitivity. Cast camera mode keeps brightSpot.
+// view: the part of the camera image the stage shows (normalized); lights cropped off the stage are ignored.
+function gameTipSpot(v, threshold, prev, view) {
+  const w = 160, h = 120, count = w * h;
+  if (!_gameSpot.c) {
+    _gameSpot.c = document.createElement('canvas'); _gameSpot.c.width = w; _gameSpot.c.height = h;
+    _gameSpot.ctx = _gameSpot.c.getContext('2d', { willReadFrequently: true });
+  }
+  let data;
+  try { _gameSpot.ctx.drawImage(v, 0, 0, w, h); data = _gameSpot.ctx.getImageData(0, 0, w, h).data; }
+  catch { return null; }
+  threshold = Math.max(150, Math.min(252, Number(threshold) || 220));
+  // Reuse buffers: tracking runs on every camera frame.
+  if (!_gameSpot.core) {
+    _gameSpot.core = new Uint8Array(count); _gameSpot.glow = new Uint8Array(count); _gameSpot.level = new Uint8Array(count);
+    _gameSpot.lum = new Uint8Array(count); _gameSpot.white = new Uint8Array(count);
+    _gameSpot.label = new Int32Array(count); _gameSpot.queue = new Int32Array(count);
+  }
+  const core = _gameSpot.core, glow = _gameSpot.glow, level = _gameSpot.level, lum = _gameSpot.lum, white = _gameSpot.white;
+  const label = _gameSpot.label, queue = _gameSpot.queue;
+  let total = 0;
+  for (let p = 0, i = 0; p < count; p++, i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const hi = Math.max(r, g, b), lo = Math.min(r, g, b), l = .299 * r + .587 * g + .114 * b;
+    level[p] = hi; lum[p] = l; total += hi;
+    // Coloured LEDs are strongly saturated (blue/red/green); warm skin is not.
+    const led = hi >= Math.max(threshold, 200) && hi - lo >= hi * .5;
+    white[p] = led ? 1 : (lo * 100 >= hi * 86 ? 1 : 0);                           // neutral white or an LED colour
+    core[p] = hi >= threshold && (l >= threshold || led) ? 1 : 0;
+  }
+  // The glow level adapts to the room: clearly above the average scene brightness, below the core.
+  const glowLevel = Math.min(threshold - 1, Math.max(threshold - 60, total / count + 40));
+  for (let p = 0; p < count; p++) { glow[p] = level[p] >= glowLevel ? 1 : 0; label[p] = 0; }
+  const step = (mask, q, mark, tailRef) => {
+    const x = q % w, y = (q / w) | 0;
+    for (let yy = y > 0 ? y - 1 : 0; yy <= (y < h - 1 ? y + 1 : y); yy++) for (let xx = x > 0 ? x - 1 : 0; xx <= (x < w - 1 ? x + 1 : x); xx++) {
+      const k = yy * w + xx; if (mask[k]) { mask[k] = 0; if (mark) label[k] = mark; queue[tailRef.t++] = k; }
+    }
+  };
+  // Glow regions: label each once and remember whether it is compact enough to hold a tip.
+  const compact = [0];
+  for (let p = 0; p < count; p++) if (glow[p]) {
+    const mark = compact.length, ref = { t: 1 }; let head = 0, left = w, right = 0, top = h, bottom = 0;
+    queue[0] = p; glow[p] = 0; label[p] = mark;
+    while (head < ref.t) { const q = queue[head++], x = q % w, y = (q / w) | 0; if (x < left) left = x; if (x > right) right = x; if (y < top) top = y; if (y > bottom) bottom = y; step(glow, q, mark, ref); }
+    compact.push(ref.t <= 2200 && right - left < 80 && bottom - top < 80);
+  }
+  const ppx = prev && Number.isFinite(prev.x) ? prev.x * w : NaN, ppy = prev && Number.isFinite(prev.y) ? prev.y * h : NaN;
+  const found = [];
+  for (let p = 0; p < count; p++) {
+    if (!core[p]) continue;
+    const region = label[p], ref = { t: 1 };
+    // Collect the core with an intensity-weighted centre, so large glowing tips stay centred.
+    let head = 0, sx = 0, sy = 0, weight = 0, peak = 0, peakLum = 0, peakWhite = 0, left = w, right = 0, top = h, bottom = 0;
+    queue[0] = p; core[p] = 0;
+    while (head < ref.t) {
+      const q = queue[head++], x = q % w, y = (q / w) | 0, wt = level[q] - threshold + 8;
+      sx += x * wt; sy += y * wt; weight += wt; if (level[q] > peak) peak = level[q];
+      if (lum[q] > peakLum) { peakLum = lum[q]; peakWhite = white[q]; }
+      if (x < left) left = x; if (x > right) right = x; if (y < top) top = y; if (y > bottom) bottom = y;
+      step(core, q, 0, ref);
+    }
+    const tail = ref.t, bw = right - left + 1, bh = bottom - top + 1, roundness = tail / (bw * bh);
+    if (!peakWhite) continue;                                                     // warm skin sheen, not a lit tip
+    if (tail > 5000 || bw > 110 || bh > 110) continue;                            // broad bright surface
+    if (tail > 400 && roundness > .9) continue;                                   // large rectangles: windows, panels
+    if (Math.max(bw, bh) > Math.min(bw, bh) * 14 + 6) continue;                   // thin lines and edges
+    // Stand-out: compare the brightest point with a ring beyond the tip's own glow.
+    const m = Math.min(24, 3 + Math.round(Math.max(bw, bh) * .75));
+    const x0 = left - m, x1 = right + m, y0 = top - m, y1 = bottom + m;
+    let ring = 0, ringLevel = 0, n = 0;
+    const sample = k => { ring += lum[k]; ringLevel += level[k]; n++; };
+    for (let xx = Math.max(0, x0); xx <= Math.min(w - 1, x1); xx += 2) { if (y0 >= 0) sample(y0 * w + xx); if (y1 < h) sample(y1 * w + xx); }
+    for (let yy = Math.max(0, y0); yy <= Math.min(h - 1, y1); yy += 2) { if (x0 >= 0) sample(yy * w + x0); if (x1 < w) sample(yy * w + x1); }
+    // Brightness contrast for white tips; colour-channel contrast for dark-looking blue/red LEDs.
+    const contrast = n ? Math.max(peakLum - ring / n, peak - ringLevel / n) : 255;
+    if (contrast < 50) continue;                                                  // weak: blends into its surroundings
+    const x = sx / weight, y = sy / weight;
+    if (view && ((x + .5) / w < view.x0 - .02 || (x + .5) / w > view.x1 + .02 || (y + .5) / h < view.y0 - .02 || (y + .5) / h > view.y1 + .02)) continue;
+    // A larger, rounder, brighter, higher-contrast light is more tip-like than a pinpoint glint, up to
+    // tip size; beyond that (lamps, bulbs) each extra pixel counts gently against it.
+    let quality = .6 * contrast + 14 * Math.log2(1 + Math.min(tail, 160)) - .03 * Math.max(0, tail - 160) + 10 * Math.min(roundness, .8) + .1 * peak;
+    // Glow spreading into a broad bright area (a window, or a tip passing a lamp) lowers quality.
+    if (!compact[region]) quality -= 40;
+    found.push({ x, y, quality, tail });
+  }
+  if (!found.length) { _gameSpot.pending = null; return null; }
+  // Continuity helps only a candidate nearly as good as the best one, so the pointer cannot stay
+  // locked onto a weaker highlight once the real tip is visible elsewhere.
+  const top = Math.max(...found.map(c => c.quality));
+  let best = null, bestScore = -Infinity;
+  for (const c of found) {
+    const d = Math.hypot(c.x - ppx, c.y - ppy);
+    const score = c.quality + (Number.isFinite(d) && c.quality >= top * .75 ? 45 * Math.max(0, 1 - d / 36) : 0);
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  // A pinpoint light away from the tip must stay lit briefly before it is followed: flickering sparkles
+  // (glasses, jewellery, a phone screen) never qualify, while a steady distant tip does within ~0.12 s.
+  const now = _gameSpot.now ? _gameSpot.now() : performance.now(), d = Math.hypot(best.x - ppx, best.y - ppy);
+  // 12 px covers a sparkle's own glow at maximum sensitivity; even a distant lit tip is far larger.
+  if (best.tail <= 12 && !(d < 20)) {
+    const pend = _gameSpot.pending;
+    if (pend && Math.hypot(best.x - pend.x, best.y - pend.y) < 16 && now - pend.last < 60) { pend.x = best.x; pend.y = best.y; pend.last = now; if (now - pend.since < 120) return null; }
+    else { _gameSpot.pending = { x: best.x, y: best.y, since: now, last: now }; return null; }
+  } else _gameSpot.pending = null;
+  // Pixel centres: grid column x covers [x, x+1) of the scaled frame, so its centre is x + 0.5.
+  return { x: (best.x + .5) / w, y: (best.y + .5) / h };
 }
 
 // How long the glowing line behind the moving wand tip lasts — short, so old movement never lingers.
@@ -5419,7 +5535,7 @@ const GAME_DEFS = [
 ];
 const CTRL_NOTES = {
   wand: 'Connect your wand in Cast. The camera follows your glowing tip, and recognized wand spells also control each game. No microphone is required. Potion: Lumos 🍃, Accio 🍄, Protego 💎. Stars: Lumos or Accio advances; Reparo restarts. Duel: cast the shown spell. Snitch: Accio. Defence: Expecto Patronum, Lumos or Protego.',
-  tip: 'Hold your <strong>Magic Caster Wand</strong> — when it\'s connected its tip lights up <strong>bright white</strong> as soon as a game starts, and the magic flare follows that tip. Works best in a dim room. To draw, show an <strong>open palm ✋ or OK sign 👌</strong> with your other hand — drop it to cast. (Squeezing the grip works too.)',
+  tip: 'Hold your <strong>Magic Caster Wand</strong> — when it\'s connected its tip lights up <strong>bright white</strong> as soon as a game starts, and the magic flare follows that tip. Works best in a dim room. To draw, show an <strong>open palm ✋ or OK sign 👌</strong> with your other hand — drop it to cast. (Squeezing the grip works too.) Spells recognised by the wand itself are ignored in camera games; say a spell instead.',
   touch: 'Play by <strong>touching the screen</strong> (or with the mouse) — the camera still records you.',
 };
 
@@ -5859,7 +5975,7 @@ const Games = {
 
   reset() {
     this.score = 0; this.timeLeft = this.def.duration; this.trail = []; this.parts = []; this.floaters = []; this.banner = null;
-    this.stroke = []; this.penDown = false; this.pinched = false; this.pointer = null; this.thumb = null; this.shakeT = 0;
+    this.stroke = []; this.penDown = false; this.pinched = false; this.pointer = null; this.thumb = null; this.shakeT = 0; this.wandSpellNoted = false;
     const W = this.W, H = this.H;
     if(Siege.is(this)){Siege.reset(this);return;}
     switch (this.def.id) {
@@ -5903,6 +6019,12 @@ const Games = {
   },
 
   // ---------- input tracking ----------
+  // The normalized part of the camera image that the stage shows after its cover crop (inverse of mapVideo).
+  cameraView() {
+    const v = this.video, vw = v.videoWidth || 1280, vh = v.videoHeight || 720;
+    const sc = Math.max(this.W / vw, this.H / vh), dw = vw * sc, dh = vh * sc, ox = (this.W - dw) / 2, oy = (this.H - dh) / 2;
+    return { x0: -ox / dw, x1: (this.W - ox) / dw, y0: -oy / dh, y1: (this.H - oy) / dh };
+  },
   mapVideo(nx, ny) {
     const v = this.video, W = this.W, H = this.H;
     const vw = v.videoWidth || 1280, vh = v.videoHeight || 720;
@@ -5931,8 +6053,14 @@ const Games = {
       }
     } else if ((this.ctrl === 'tip'||this.ctrl==='wand') && ready) {
       SignGate.step(v);
-      const p = brightSpot(v, S.tipThreshold, this.lostT < 10 ? this.tipLast : null);
-      if (p) { this.tipLast = p; this.setPointer(this.mapVideo(p.x, p.y)); this.lostT = 0; }
+      const p = gameTipSpot(v, S.tipThreshold, this.lostT < 10 ? this.tipLast : null, this.cameraView());
+      if (p) {
+        // A genuine re-acquisition far away snaps there: smoothing would sweep the pointer across the
+        // playfield and the trail would draw a false line between the two places.
+        const m = this.mapVideo(p.x, p.y), jump = this.pointer && Math.hypot(m.x - this.pointer.x, m.y - this.pointer.y) > Math.min(this.W, this.H) * .3;
+        if (jump) this.trail = [];
+        this.tipLast = p; this.setPointer(m, jump); this.lostT = 0;
+      }
       else { this.lostT = (this.lostT || 0) + 1; if (this.lostT > 10) this.pointer = null; }
     }
     const pen = this.ctrl === 'hand' ? this.pinched : (this.ctrl === 'tip'||this.ctrl==='wand') ? (SignGate.on || this.touchHeld || Wand.gripped) : this.touchHeld;
@@ -6122,6 +6250,12 @@ const Games = {
     }
   },
 
+  ignoreWandSpell(spell) {
+    diag('camera game: ignored wand-recognised ' + spell.name);
+    if (this.phase !== 'play' || this.wandSpellNoted) return;
+    this.wandSpellNoted = true;
+    this.floater('📷 Camera game: point your tip · voice works', this.W / 2, this.H * .3, '#def5ff');
+  },
   onSpell(spell,source='voice') {
     if(!this.active||this.phase!=='play')return;
     const g=this.g;
@@ -8259,7 +8393,7 @@ const GameSetup={
   init(){const d=document.createElement('dialog');d.id='gameSetup';d.className='game-setup';d.innerHTML='<h2 id="setupTitle">Ready your wand</h2><p>Use a dim, evenly lit room with a plain darker background. Avoid bright windows, lamps and reflections behind the tip.</p><p>Keep the glowing tip inside the camera frame. Start where your whole wand movement fits, then move closer if the tip is too small or farther away if it becomes a large glare. No fixed distance works for every camera.</p><div class="setup-camera"><video id="setupVideo" muted playsinline></video><span id="setupDot" hidden></span></div><label class="field" for="setupSensitivity">Dim-tip sensitivity</label><input id="setupSensitivity" type="range" min="0" max="100" value="31"><p class="note">Raise this for a dim tip. If the marker follows lamps or reflections, lower it.</p><p id="setupStatus" role="status" aria-live="polite">Check your camera, then move the tip slowly across the preview.</p><div class="row"><button class="btn primary grow" id="setupCheck">Check tracking</button><button class="btn grow" id="setupPlay">Play game</button><button class="btn grow" id="setupClose">Cancel</button></div><p class="note">For Spell Duel: squeeze the grip while drawing, then release. Without a connected wand, hold on the playfield while drawing with the tip, then release. Voice can cast the requested spell too.</p>';document.body.append(d);$('setupSensitivity').oninput=e=>{S.tipThreshold=252-Math.round(Number(e.target.value)*1.02);saveSettings();};$('setupCheck').onclick=()=>this.check();$('setupPlay').onclick=()=>{const def=this.def;this.close();Games.start(def);};$('setupClose').onclick=()=>this.close();d.addEventListener('cancel',()=>this.close());},
   open(def){this.close();this.def=def;$('setupSensitivity').value=Math.max(0,Math.min(100,(252-S.tipThreshold)/1.02));$('setupTitle').textContent='Before '+def.name;$('setupStatus').textContent='Check tracking or start when ready. A bright white tip is easiest to see.';$('gameSetup').showModal();},
   close(){this.run++;cancelAnimationFrame(this.raf);this.stream?.getTracks().forEach(t=>t.stop());this.stream=null;if($('setupVideo'))$('setupVideo').srcObject=null;$('setupDot').hidden=true;$('gameSetup').close();Wand.sceneOff('setup');},
-  async check(){const run=++this.run;cancelAnimationFrame(this.raf);this.stream?.getTracks().forEach(t=>t.stop());this.prev=null;this.hits=[];$('setupStatus').textContent='Starting camera…';Wand.sceneOn('setup');try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});if(run!==this.run){s.getTracks().forEach(t=>t.stop());return;}this.stream=s;const v=$('setupVideo');v.srcObject=s;await v.play();if(run!==this.run)return;const step=()=>{if(run!==this.run)return;if(v.readyState>=2){const p=brightSpot(v,S.tipThreshold,this.prev);this.prev=p;this.hits.push(!!p);if(this.hits.length>40)this.hits.shift();$('setupDot').hidden=!p;if(p){$('setupDot').style.left=(100*(1-p.x))+'%';$('setupDot').style.top=(100*p.y)+'%';}const rate=this.hits.filter(Boolean).length/this.hits.length;$('setupStatus').textContent=this.hits.length<20?'Checking… move the glowing tip.':rate>.8?'Tip candidate tracked steadily. Check that the marker follows your wand.':rate>.35?'Tracking is intermittent. Adjust your distance and remove bright background lights.':'Tip not found reliably. Light the tip, keep it in frame, and try a darker background.';}this.raf=requestAnimationFrame(step);};step();}catch(e){if(run!==this.run)return;$('setupStatus').textContent='Camera unavailable. Allow camera access, or use Touch controls.';Wand.sceneOff('setup');}}
+  async check(){const run=++this.run;cancelAnimationFrame(this.raf);this.stream?.getTracks().forEach(t=>t.stop());this.prev=null;this.hits=[];$('setupStatus').textContent='Starting camera…';Wand.sceneOn('setup');try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});if(run!==this.run){s.getTracks().forEach(t=>t.stop());return;}this.stream=s;const v=$('setupVideo');v.srcObject=s;await v.play();if(run!==this.run)return;const step=()=>{if(run!==this.run)return;if(v.readyState>=2){const p=gameTipSpot(v,S.tipThreshold,this.prev);this.prev=p;this.hits.push(!!p);if(this.hits.length>40)this.hits.shift();$('setupDot').hidden=!p;if(p){$('setupDot').style.left=(100*(1-p.x))+'%';$('setupDot').style.top=(100*p.y)+'%';}const rate=this.hits.filter(Boolean).length/this.hits.length;$('setupStatus').textContent=this.hits.length<20?'Checking… move the glowing tip.':rate>.8?'Tip candidate tracked steadily. Check that the marker follows your wand.':rate>.35?'Tracking is intermittent. Adjust your distance and remove bright background lights.':'Tip not found reliably. Light the tip, keep it in frame, and try a darker background.';}this.raf=requestAnimationFrame(step);};step();}catch(e){if(run!==this.run)return;$('setupStatus').textContent='Camera unavailable. Allow camera access, or use Touch controls.';Wand.sceneOff('setup');}}
 };
 const AutoVoice={
   blocked:false,
@@ -8347,7 +8481,7 @@ function init() {
   Wand.tryRemembered();
   diag(`ready · ${SPELLS.length} spells · ${IS_IOS ? 'iOS' : IS_ANDROID ? 'Android' : 'desktop'} · bluetooth ${Wand.supported ? 'yes' : 'no'} · voice ${Voice.supported ? 'yes' : 'no'}`);
   // Test hook for automated checks.
-  window.__mcw = { MagicShows, GameSetup, Academy, ACADEMY_LESSONS, matchIncantation, SpellInput, Combo, WebBrowser, IPTV, MediaPlayer, OnlinePlayer, MediaHub, goPage, Box, Torch, ScreenLight, MagicLights, FXPack, GreatHall, holdLightMacro, performCast, SPELLS, BY_SLUG, Combo, S, FX, Camera, Wand, Voice, Games, Recorder, Gallery, GAME_DEFS, classifyGesture, setMode, brightSpot, handSign, SignGate, HandModel, Tour, Coach, Progress, LESSONS, LightCheck, WandCheck, Journey, renderBoxUi, openSpell, playEffectVideo, stopEffectVideo, Actions, Box, GESTURE_SPELLS, GESTURE_PATHS, spellGuideHtml, Siege, WandBalloons, WandRunes, GAME_ORDER, Professor };
+  window.__mcw = { MagicShows, GameSetup, Academy, ACADEMY_LESSONS, matchIncantation, SpellInput, Combo, WebBrowser, IPTV, MediaPlayer, OnlinePlayer, MediaHub, goPage, Box, Torch, ScreenLight, MagicLights, FXPack, GreatHall, holdLightMacro, performCast, SPELLS, BY_SLUG, Combo, S, FX, Camera, Wand, Voice, Games, Recorder, Gallery, GAME_DEFS, classifyGesture, setMode, brightSpot, handSign, SignGate, HandModel, Tour, Coach, Progress, LESSONS, LightCheck, WandCheck, Journey, renderBoxUi, openSpell, playEffectVideo, stopEffectVideo, Actions, Box, GESTURE_SPELLS, GESTURE_PATHS, spellGuideHtml, Siege, WandBalloons, WandRunes, GAME_ORDER, Professor, gameTipSpot };
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
